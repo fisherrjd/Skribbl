@@ -1,0 +1,8 @@
+.db
+.direnv
+result*
+.env
+
+/models
+/recordings
+/transcripts
