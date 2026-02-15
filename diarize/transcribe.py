@@ -2,11 +2,13 @@ import sys
 from os import environ
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
 import whisperx
 from dotenv import load_dotenv
-from pyannote.audio import Pipeline
+from pyannote.audio import Inference, Pipeline
+from voice_library import VoiceLibrary
 
 _original_torch_load = torch.load
 torch.load = lambda *args, **kwargs: _original_torch_load(
@@ -44,6 +46,70 @@ def format_timestamp(seconds):
     m, s = divmod(int(seconds), 60)
     h, m = divmod(m, 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def identify_speakers(
+    diarize_result, others_audio: np.ndarray, voice_library: VoiceLibrary
+) -> dict[str, str]:
+    """
+    Identify speakers by matching diarized segments to enrolled voice profiles.
+
+    Args:
+        diarize_result: Pyannote diarization result
+        others_audio: Audio waveform (numpy array)
+        voice_library: VoiceLibrary instance with enrolled speakers
+
+    Returns:
+        Dictionary mapping generic labels (SPEAKER_00) to identified names
+    """
+    if not voice_library.profiles:
+        print("  No enrolled speakers - using generic labels", file=sys.stderr)
+        return {}
+
+    print("  Identifying speakers...", file=sys.stderr)
+
+    # Get embedding model
+    embedding_model = Inference("pyannote/embedding", window="whole")
+
+    # Extract speaker segments and compute embeddings
+    speaker_embeddings = {}
+
+    for segment, _, speaker_label in diarize_result.itertracks(yield_label=True):
+        if speaker_label not in speaker_embeddings:
+            # Extract audio segment for this speaker
+            start_sample = int(segment.start * 16000)
+            end_sample = int(segment.end * 16000)
+            segment_audio = others_audio[start_sample:end_sample]
+
+            # Compute embedding for this segment
+            # Create temporary audio dict for pyannote
+            audio_dict = {
+                "waveform": torch.from_numpy(segment_audio).unsqueeze(0).float(),
+                "sample_rate": 16000,
+            }
+
+            embedding = embedding_model(audio_dict)
+
+            # Convert to numpy
+            if isinstance(embedding, torch.Tensor):
+                embedding = embedding.cpu().numpy().flatten()
+
+            # Store first embedding for this speaker
+            speaker_embeddings[speaker_label] = embedding
+
+    # Match each speaker to enrolled profiles
+    speaker_mapping = {}
+
+    for speaker_label, embedding in speaker_embeddings.items():
+        identified_name = voice_library.identify_speaker(embedding, threshold=0.7)
+
+        if identified_name:
+            speaker_mapping[speaker_label] = identified_name
+            print(f"  ✓ {speaker_label} → {identified_name}", file=sys.stderr)
+        else:
+            print(f"  ? {speaker_label} → Unknown (no match found)", file=sys.stderr)
+
+    return speaker_mapping
 
 
 def main():
@@ -87,6 +153,21 @@ def main():
     diarize_df["start"] = diarize_df["segment"].apply(lambda x: x.start)
     diarize_df["end"] = diarize_df["segment"].apply(lambda x: x.end)
     others_result = whisperx.assign_word_speakers(diarize_df, others_result)
+
+    # Load voice library and identify speakers
+    voice_library = VoiceLibrary()
+    voice_library.load_profiles()
+
+    speaker_mapping = {}
+    if voice_library.profiles:
+        speaker_mapping = identify_speakers(diarize_result, others_audio, voice_library)
+
+    # Apply speaker mapping to segments
+    for seg in others_result["segments"]:
+        speaker_label = seg.get("speaker", "Unknown")
+        # Map generic label to identified name if available
+        if speaker_label in speaker_mapping:
+            seg["speaker"] = speaker_mapping[speaker_label]
 
     # Merge both transcripts by timestamp
     all_segments = self_result["segments"] + others_result["segments"]

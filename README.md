@@ -1,131 +1,205 @@
-# Skribbl — Meeting Transcription Pipeline Plan
+# Skribbl — Meeting Transcription with Speaker Identification
 
-## Context
+Local meeting transcription pipeline for M1 Mac that produces speaker-labeled transcripts from audio recordings.
 
-The goal is to take meeting recordings (MP4 from OBS) and produce speaker-labeled transcripts, all running locally on an M1 Mac with 16GB RAM. The current codebase has a skeleton diarization script using pyannote 3.1 and a whisper-cpp small English model, but nothing is wired together yet.
+## Current Status
+
+**Working:**
+- Speaker diarization using pyannote.audio 3.1
+- Full meeting transcription with WhisperX
+- Timestamped speaker-labeled output
+
+**In Progress:**
+- Voice library system for speaker identification (enrolling known speakers)
+- Converting generic labels (SPEAKER_00, SPEAKER_01) to actual names
+
+## Project Structure
+
+```
+Skribbl/
+├── main.py                          # Entry point (currently minimal)
+├── diarize/
+│   ├── diarize_meeting.py          # Standalone pyannote diarization (2 speakers)
+│   └── transcribe.py               # Full pipeline: WhisperX + pyannote + alignment
+├── voice_profiles/                  # Storage for enrolled speaker voice embeddings
+├── recordings/                      # Input audio files (WAV)
+├── transcripts/                     # Output transcripts
+│   └── Peackock_Meeting.md         # Example output
+├── models/                          # Whisper models
+└── pyproject.toml                   # Dependencies
+
+```
+
+## Current Pipeline
+
+### diarize/transcribe.py
+
+The main transcription script that handles everything end-to-end:
+
+1. **Transcribe "self" track** (your microphone) with WhisperX
+   - Labels all segments as "Me"
+   - Uses alignment model for word-level timestamps
+
+2. **Transcribe "others" track** (desktop audio/other participants) with WhisperX
+   - Full transcription with alignment
+
+3. **Diarize "others" track** with pyannote
+   - Identifies different speakers in the mixed audio
+   - Creates speaker segments
+
+4. **Assign speakers to transcription**
+   - Maps diarized speaker segments to transcribed words
+   - Labels speakers as SPEAKER_00, SPEAKER_01, etc.
+
+5. **Merge and output**
+   - Combines self + others transcripts
+   - Sorts by timestamp
+   - Outputs formatted transcript
+
+**Usage:**
+```bash
+python diarize/transcribe.py recordings/self.wav recordings/others.wav
+```
+
+**Output format:**
+```
+[00:01:15] Me: So for this sprint, we need to focus on...
+[00:01:32] SPEAKER_00: Right, I think the priority should be...
+[00:01:45] SPEAKER_01: I agree with that approach.
+```
+
+### diarize/diarize_meeting.py
+
+Standalone speaker diarization script (simpler version for testing):
+
+```bash
+python diarize/diarize_meeting.py system.wav
+```
+
+Outputs speaker segments:
+```
+15.2s - 28.4s: SPEAKER_00
+28.6s - 42.1s: SPEAKER_01
+```
+
+## Technology Stack
+
+- **WhisperX**: Speech-to-text with word-level alignment
+  - Model: large-v3
+  - Language: English
+  - Device: CPU (with int8 quantization for M1 efficiency)
+
+- **pyannote.audio 3.1**: Speaker diarization and voice embeddings
+  - Requires HuggingFace token (see setup)
+
+- **Python 3.13**: Runtime
+
+## Setup
+
+### 1. Install dependencies
+
+```bash
+uv sync
+```
+
+### 2. HuggingFace Authentication
+
+pyannote models require accepting their license and providing a token:
+
+1. Visit https://huggingface.co/pyannote/speaker-diarization-3.1
+2. Accept the license
+3. Create an access token at https://huggingface.co/settings/tokens
+4. Login with token:
+
+```bash
+uvx hf auth login
+```
+
+Or set environment variable:
+```bash
+export HF_TOKEN="your_token_here"
+```
+
+Add to `.env` file:
+```
+hf_token=your_token_here
+```
+
+### 3. Prepare audio files
+
+If you have separate mic tracks from OBS:
+- `recordings/self.wav` - Your microphone
+- `recordings/others.wav` - Desktop audio/other participants
+
+Both should be 16kHz mono WAV files.
+
+## Planned: Voice Library System
+
+**Goal:** Replace generic speaker labels with actual names
+
+**Approach:**
+1. **Enrollment**: Extract voice embeddings from known speaker samples
+2. **Storage**: Save embeddings in `voice_profiles/` with speaker metadata
+3. **Identification**: Match diarized clusters against enrolled speakers
+4. **Labeling**: Map SPEAKER_XX → "Alice", "Bob", etc.
+
+**Implementation:**
+- Use pyannote's embedding model to extract voice signatures
+- Store embeddings as numpy arrays with JSON metadata
+- Cosine similarity matching during diarization
+- CLI tools for enrolling/managing speaker profiles
+
+## Dependencies
+
+Key packages (see `pyproject.toml` for full list):
+- `whisperx>=3.7.6` - Transcription with alignment
+- `python-dotenv>=1.2.1` - Environment config
+- pyannote.audio (transitively via whisperx)
+- torch, torchaudio (for ML models)
+
+Dev tools:
+- black, ruff (formatting/linting)
+- pytest, pytest-cov (testing)
 
 ## Constraints
 
-- **16GB RAM M1 Mac** — must run everything locally and sequentially (not simultaneously) to stay within memory
-- **No external servers** — not using the eldo whisper server; everything runs on this machine
-- **HuggingFace token required** — pyannote models (including the newer community-1) require accepting a license and providing an auth token
+- **16GB RAM M1 Mac** - All processing runs locally
+- **No external servers** - Everything on this machine
+- **Sequential processing** - To manage memory, don't run transcription + diarization simultaneously
 
-## Architecture: Sequential Pipeline
+## Examples
 
-The pipeline runs in discrete, sequential stages to manage memory on 16GB:
+See `transcripts/Peackock_Meeting.md` for example output from a real meeting recording.
 
-```
-MP4 → [ffmpeg] → WAV → [pyannote] → speaker segments → [whisper-cpp] → transcription → [merge] → labeled transcript
-```
+## Documentation
 
-### Stage 1: Audio Extraction
-- **Tool**: ffmpeg (already in nix env)
-- **Action**: Extract audio from MP4 → 16kHz mono WAV
-- **Command**: `ffmpeg -i recording.mp4 -vn -acodec pcm_s16le -ar 16000 -ac 1 output.wav`
-- 16kHz mono is the sweet spot — works for both whisper-cpp and pyannote
+📚 **[Complete Documentation Index](DOCUMENTATION_INDEX.md)** - Your guide to all documentation
 
-### Stage 2: Speaker Diarization
-- **Tool**: pyannote.audio 4.0 with `speaker-diarization-community-1` model
-- **Why community-1 over 3.1**: Better accuracy across all metrics, CC-BY-4.0 license, actively maintained. Still requires HF token but is fully open source.
-- **Output**: List of `(start_time, end_time, speaker_label)` segments
-- **Memory**: ~2-4GB for typical meeting-length audio (<1hr). Runs on CPU or MPS (Apple Silicon GPU). For longer recordings, memory can spike during clustering — we'll process on CPU to keep it manageable.
-- **Key**: After diarization completes, we explicitly unload the model to free memory before whisper runs.
+**Quick Links:**
+- **[Quick Start Guide](QUICK_START.md)** - Get started in 3 steps
+- **[Enrollment Script](ENROLLMENT_SCRIPT.md)** - Standard phrases for voice enrollment
+- **[Voice Library Guide](VOICE_LIBRARY_GUIDE.md)** - Complete reference for speaker identification
+- **[Example Workflow](EXAMPLE_WORKFLOW.md)** - Real-world usage walkthrough
+- **[Architecture](ARCHITECTURE.md)** - Technical deep dive
 
-### Stage 3: Transcription
-- **Tool**: whisper-cpp CLI (already in nix env) with `models/ggml-small.en.bin`
-- **Approach**: Transcribe the **full audio file once** with word-level timestamps, rather than splitting into per-speaker segments
-  - Why: Splitting audio loses context at boundaries, produces worse transcription quality, and is slower due to per-segment overhead
-  - whisper-cpp outputs timestamps per segment that we can align with diarization
-- **Output**: Timestamped transcript segments
-- **Memory**: ~500MB for small.en model — very comfortable on 16GB
+## Current Status
 
-### Stage 4: Merge Diarization + Transcription
-- **Pure Python, no ML models needed**
-- Align whisper transcript segments with pyannote speaker segments by timestamp overlap
-- For each whisper segment, assign the speaker who has the most overlap with that time range
-- Output a clean transcript:
-  ```
-  [00:01:15] SPEAKER_00: So for this sprint, we need to focus on...
-  [00:01:32] SPEAKER_01: Right, I think the priority should be...
-  ```
+### ✅ Completed
+- WhisperX transcription with word-level alignment
+- Pyannote speaker diarization
+- Voice library system for speaker enrollment
+- Speaker identification (maps SPEAKER_00 → names)
+- Unified CLI interface (`main.py`)
+- Comprehensive documentation
 
-### Stage 5 (Future): Speaker Identification / Enrollment
-- **Not in initial implementation** — first version uses generic labels (SPEAKER_00, SPEAKER_01)
-- Later: use pyannote's embedding model to extract voice embeddings from known speakers
-- Store embeddings in a local voice database (JSON/SQLite + numpy arrays)
-- At diarization time, match cluster centroids against enrolled embeddings to map SPEAKER_00 → "Alice"
-- This is a natural extension once the base pipeline works
+### 🚀 Ready to Use
+The system is fully functional! You can:
+1. Enroll team members with voice samples
+2. Transcribe meetings with automatic speaker identification
+3. Get labeled transcripts with actual names
 
-## File Structure
-
-```
-skribbl/
-├── main.py                      # CLI entry point — orchestrates the pipeline
-├── skribbl/
-│   ├── __init__.py
-│   ├── extract.py               # Stage 1: ffmpeg audio extraction
-│   ├── diarize.py               # Stage 2: pyannote diarization
-│   ├── transcribe.py            # Stage 3: whisper-cpp transcription
-│   ├── merge.py                 # Stage 4: align and merge results
-│   └── models.py                # Shared data types (Segment, Speaker, etc.)
-├── diarize/                     # (existing — will be replaced by skribbl/diarize.py)
-├── models/
-│   └── ggml-small.en.bin        # Whisper model (already present)
-├── recordings/                  # Input recordings
-├── transcripts/                 # Output transcripts
-└── pyproject.toml               # Add runtime deps: pyannote.audio, torch
-```
-
-## Dependencies to Add
-
-In `pyproject.toml`:
-```toml
-dependencies = [
-    "pyannote.audio>=3.3",
-    "torch",
-    "torchaudio",
-]
-```
-
-whisper-cpp and ffmpeg are provided by the nix environment — no Python packages needed for those.
-
-## CLI Interface
-
-```bash
-# Basic usage
-python main.py recordings/Sprint_Planning_2_12_26.mp4
-
-# Output goes to transcripts/Sprint_Planning_2_12_26.txt
-```
-
-Options:
-- `--model` — whisper model path (default: `models/ggml-small.en.bin`)
-- `--output` — output transcript path
-- `--hf-token` — HuggingFace token (or read from `HF_TOKEN` env var)
-
-## Implementation Order
-
-1. **Data models** (`skribbl/models.py`) — define Segment, DiarizedSegment, TranscriptSegment types
-2. **Audio extraction** (`skribbl/extract.py`) — ffmpeg wrapper, simple subprocess call
-3. **Diarization** (`skribbl/diarize.py`) — pyannote wrapper, returns list of DiarizedSegments
-4. **Transcription** (`skribbl/transcribe.py`) — whisper-cpp CLI wrapper, parses output into TranscriptSegments
-5. **Merge** (`skribbl/merge.py`) — timestamp alignment logic
-6. **CLI orchestration** (`main.py`) — wire it all together with argparse
-7. **Test with the sprint planning recording**
-
-## Verification
-
-1. Run `ffmpeg` extraction on the MP4 and confirm a valid WAV is produced
-2. Run diarization on the WAV and inspect speaker segments — do they look reasonable?
-3. Run whisper-cpp on the WAV and confirm we get timestamped transcription
-4. Run the merge and inspect the final labeled transcript
-5. Compare against manually listening to sections of the recording to validate speaker labels
-
-
-
-### COMMANDS
-
-Hugging face Login
-```
-uvx hf auth login
-```
+### 🔮 Future Enhancements
+- Confidence scores for speaker matches
+- Multi-sample enrollment (average multiple samples)
+- Web UI for voice library management
+- LLM-based meeting notes generation
