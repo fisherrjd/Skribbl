@@ -2,12 +2,22 @@
 
 import json
 from dataclasses import asdict, dataclass
+from os import environ
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import torch
+from dotenv import load_dotenv
 from pyannote.audio import Inference
+
+# Workaround for pyannote model loading issue with PyTorch 2.6+
+_original_torch_load = torch.load
+torch.load = lambda *args, **kwargs: _original_torch_load(
+    *args, **{**kwargs, "weights_only": False}
+)
+
+load_dotenv()
 
 
 @dataclass
@@ -47,9 +57,11 @@ class VoiceLibrary:
         """Lazy load the embedding model."""
         if self._embedding_model is None:
             print("Loading pyannote embedding model...")
+            hf_token = environ.get("HF_TOKEN") or environ.get("hf_token")
             self._embedding_model = Inference(
                 "pyannote/embedding",
                 window="whole",
+                use_auth_token=hf_token,
             )
         return self._embedding_model
 

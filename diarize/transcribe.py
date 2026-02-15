@@ -68,8 +68,11 @@ def identify_speakers(
 
     print("  Identifying speakers...", file=sys.stderr)
 
-    # Get embedding model
-    embedding_model = Inference("pyannote/embedding", window="whole")
+    # Get embedding model with auth token
+    hf_token = environ.get("HF_TOKEN") or environ.get("hf_token")
+    embedding_model = Inference(
+        "pyannote/embedding", window="whole", use_auth_token=hf_token
+    )
 
     # Extract speaker segments and compute embeddings
     speaker_embeddings = {}
@@ -132,8 +135,18 @@ def main():
     print("Transcribing self...", file=sys.stderr)
     self_result, _ = transcribe_and_align(model, self_path)
 
+    # Use enrolled name for self if available, otherwise "Me"
+    self_speaker_name = "Me"
+    voice_library = VoiceLibrary()
+    voice_library.load_profiles()
+
+    # Check if there's an enrolled speaker (you can specify via env var or arg)
+    self_enrolled_name = environ.get("SELF_SPEAKER_NAME")
+    if self_enrolled_name and self_enrolled_name in voice_library.profiles:
+        self_speaker_name = self_enrolled_name
+
     for seg in self_result["segments"]:
-        seg["speaker"] = "Me"
+        seg["speaker"] = self_speaker_name
 
     # Transcribe others (needs diarization)
     print("Transcribing others...", file=sys.stderr)
